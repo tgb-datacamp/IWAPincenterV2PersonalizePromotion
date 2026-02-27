@@ -1,0 +1,134 @@
+{
+  "name": "IWA Opt-in & OTP Verification",
+  "nodes": [
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d001",
+      "name": "Receive IWA Opt-in Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "iwa-optin",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d002",
+      "name": "Generate OTP & Expiry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300],
+      "parameters": {
+        "jsCode": "const otp = Math.floor(100000 + Math.random() * 900000).toString();\nconst expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();\nconst body = $input.item.json.body;\nif (!body.iwa_id || !body.campaign_id || !body.phone_number) {\n  throw new Error('Missing required field(s): iwa_id, campaign_id, or phone_number');\n}\nreturn [{ json: { iwa_id: body.iwa_id, campaign_id: body.campaign_id, phone_number: body.phone_number, otp_code: otp, expires_at: expiresAt } }];"
+      }
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d003",
+      "name": "Store OTP in Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [720, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO otp_verifications (iwa_id, campaign_id, phone_number, otp_code, expires_at, created_at) VALUES ('{{ $json.iwa_id }}', '{{ $json.campaign_id }}', '{{ $json.phone_number }}', '{{ $json.otp_code }}', '{{ $json.expires_at }}'::TIMESTAMPTZ, NOW()) ON CONFLICT (iwa_id, campaign_id) DO UPDATE SET otp_code = EXCLUDED.otp_code, phone_number = EXCLUDED.phone_number, expires_at = EXCLUDED.expires_at, created_at = NOW();",
+        "options": {}
+      }
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d004",
+      "name": "Send OTP via SMS Gateway",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300],
+      "continueOnFail": true,
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.your-sms-provider.com/v1/messages",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_SMS_API_KEY" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "to", "value": "={{ $json.phone_number }}" },
+            { "name": "message", "value": "={{ 'PineCenter V2: Your verification code is ' + $json.otp_code + '. Valid for 5 minutes. Do not share this code.' }}" },
+            { "name": "from", "value": "PineCenter" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d005",
+      "name": "Check SMS Result",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-check-error",
+              "leftValue": "={{ $json.error !== undefined }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d006",
+      "name": "Return Success to Frontend",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1440, 180],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'OTP sent to your registered phone number. Please enter it to continue.', iwa_id: $node['Generate OTP & Expiry'].json.iwa_id, campaign_id: $node['Generate OTP & Expiry'].json.campaign_id }) }}",
+        "options": { "responseCode": 200 }
+      }
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d007",
+      "name": "Return Error to Frontend",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1440, 440],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, message: 'Failed to send OTP. Please try again or contact support.', error: String($json.error && $json.error.message ? $json.error.message : 'SMS delivery failed') }) }}",
+        "options": { "responseCode": 500 }
+      }
+    }
+  ],
+  "connections": {
+    "Receive IWA Opt-in Request": { "main": [[{ "node": "Generate OTP & Expiry", "type": "main", "index": 0 }]] },
+    "Generate OTP & Expiry": { "main": [[{ "node": "Store OTP in Database", "type": "main", "index": 0 }]] },
+    "Store OTP in Database": { "main": [[{ "node": "Send OTP via SMS Gateway", "type": "main", "index": 0 }]] },
+    "Send OTP via SMS Gateway": { "main": [[{ "node": "Check SMS Result", "type": "main", "index": 0 }]] },
+    "Check SMS Result": {
+      "main": [
+        [{ "node": "Return Success to Frontend", "type": "main", "index": 0 }],
+        [{ "node": "Return Error to Frontend", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}
